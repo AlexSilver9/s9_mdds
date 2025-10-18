@@ -1,4 +1,3 @@
-use std::fs;
 use crate::http::ApiContext;
 use axum::routing::get;
 use axum::{Extension, Json, Router};
@@ -7,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use axum::extract::{Path, Query};
 use chrono::{DateTime, NaiveDate, Utc};
+use tokio::fs;
 use crate::config::Config;
 
 pub fn router() -> Router {
@@ -27,13 +27,13 @@ pub fn router() -> Router {
         + "/" + stream_capture_path
         + "/" + symbol_capture_path;
 
+    // Example URLs:
     // localhost:8080/api/v1/market-data/binance/spot/trade/ethusdt?from=2025-10-15T16:21:30.160Z&to=2025-10-15T16:21:39.049Z
     // localhost:8080/api/v1/market-data/binance/spot/trade/ethusdt?from=2025-10-15T16:21:32.000Z&to=2025-10-15T16:21:32.100Z
+
+    // Example data file paths:
     // data/market_data/binance/spot/trade/ethusdt.2019-04-05.parquet
     // data/market_data/binance/spot/trade/ethusdt.2019-04-06.parquet
-
-    // localhost:8080/api/v1/market-data/binance/spot/trade/ethusdt
-    // data/market_data/binance/spot/trade/ethusdt.parquet
     Router::new().route(route.as_str(),get(get_market_data))
 }
 
@@ -67,7 +67,7 @@ async fn get_market_data(
     ctx: Extension<ApiContext>,
     Path((exchange, market_type, stream, symbol)): Path<(String, String, String, String)>,
     Query(query): Query<QueryParams>,
-) -> Result<Json<ApiResponse<Vec<Message>>>, StatusCode>
+) -> anyhow::Result<Json<ApiResponse<Vec<Message>>>, StatusCode>
 {
     tracing::info!("Loading market data for {}/{}/{}/{}", exchange, market_type, stream, symbol);
 
@@ -83,7 +83,9 @@ async fn get_market_data(
             from: &from,
             to: &to,
         };
-        find_files_for_date_range(find_file_params).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        find_files_for_date_range(find_file_params)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
     } else {
         return Err(StatusCode::BAD_REQUEST);
     };
@@ -112,7 +114,7 @@ async fn get_market_data(
     Ok(Json(ApiResponse{ messages: all_messages }))
 }
 
-async fn read_parquet_file(ctx: &Extension<ApiContext>, file_path: &PathBuf) -> Result<Vec<Message>, StatusCode> {
+async fn read_parquet_file(ctx: &Extension<ApiContext>, file_path: &PathBuf) -> anyhow::Result<Vec<Message>, StatusCode> {
     let batch_size = &ctx.config.parquet_reader_record_batch_size;
     let reader = s9_parquet::AsyncParquetReader::new(file_path, *batch_size).await
         .map_err(|err| {
@@ -159,20 +161,19 @@ struct FindFileParams<'a> {
     to: &'a DateTime<Utc>,
 }
 
-pub fn find_files_for_date_range(params: FindFileParams) -> Result<Vec<PathBuf>, std::io::Error> {
+async fn find_files_for_date_range(params: FindFileParams<'_>) -> anyhow::Result<Vec<PathBuf>, std::io::Error> {
     let mut symbol_dir = PathBuf::from(params.base_path);
     symbol_dir.push(params.exchange);
     symbol_dir.push(params.market_type);
     symbol_dir.push(params.stream);
 
     // Single directory read
-    let entries = fs::read_dir(&symbol_dir)?;
+    let mut entries = fs::read_dir(&symbol_dir).await?;
     let mut matching_files = Vec::new();
 
     let file_extension = format!(".{}", params.parquet_file_extension);
 
-    for entry in entries {
-        let entry = entry?;
+    while let Some(entry) = entries.next_entry().await? {
         let filename = entry.file_name();
         let filename_str = filename.to_string_lossy();
 
@@ -180,7 +181,7 @@ pub fn find_files_for_date_range(params: FindFileParams) -> Result<Vec<PathBuf>,
         if let Some(date_str) = extract_date_from_filename(&filename_str, params.symbol, &file_extension) {
             if let Ok(file_date) = NaiveDate::parse_from_str(&date_str, "%Y-%m-%d") {
                 let file_date = file_date.and_hms_opt(0, 0, 0).unwrap();
-                let file_date_utc = DateTime::<Utc>::from_utc(file_date, Utc);
+                let file_date_utc = DateTime::<Utc>::from_naive_utc_and_offset(file_date, Utc);
 
                 // Check if file date overlaps with query range
                 if file_date_utc.date_naive() >= params.from.date_naive() &&
