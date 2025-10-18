@@ -13,9 +13,13 @@ s9_parquet = { git = "https://github.com/AlexSilver9/s9_parquet.git" }
 #rustls = { version = "0.23.22", default-features = false, features = ["std", "aws_lc_rs"] }
 futures = "0.3"
 tokio = { version = "1.48", features = ["full"] }
-axum = "0.8"
+axum = { version = "0.8", features = ["tracing", "tower-log"] }
 tower = "0.5"
-tower-http = { version = "0.6", features = ["compression-zstd", "cors", "fs", "tracing"]}
+tower-http = { version = "0.6", features = ["compression-zstd", "cors", "fs", "tracing", "trace"] }
+http = "1.3"
+http-body = "1.0"
+http-body-util = "0.1"
+mime = "0.3"
 
 # Serdes
 serde = { version = "1.0", features = ["derive"] }
