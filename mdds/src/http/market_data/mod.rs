@@ -1,4 +1,4 @@
-use crate::http::ApiContext;
+use crate::http::{ApiContext, FileMetadata};
 use axum::routing::get;
 use axum::{Extension, Json, Router};
 use http::StatusCode;
@@ -7,7 +7,6 @@ use std::path::PathBuf;
 use axum::extract::{Path, Query};
 use chrono::{DateTime, NaiveDate, Utc};
 use tokio::fs;
-use crate::config::Config;
 
 pub fn router() -> Router {
 
@@ -37,19 +36,13 @@ pub fn router() -> Router {
     Router::new().route(route.as_str(),get(get_market_data))
 }
 
-// Cache file metadata to avoid filesystem calls
-struct FileMetadata {
-    path: PathBuf,
-    date: NaiveDate,
-    size: u64,
-}
-
 #[derive(Deserialize)]
 struct QueryParams {
     from: Option<DateTime<Utc>>,
     to: Option<DateTime<Utc>>,
 }
 
+// TODO: Move this to a separate codec repo to share with adapters and s9_parquet
 #[derive(Debug, Serialize)]
 struct Message {
     pub timestamp_millis: i64,
@@ -69,7 +62,7 @@ async fn get_market_data(
     Query(query): Query<QueryParams>,
 ) -> anyhow::Result<Json<ApiResponse<Vec<Message>>>, StatusCode>
 {
-    tracing::info!("Loading market data for {}/{}/{}/{}", exchange, market_type, stream, symbol);
+    tracing::info!("loading market data for {}/{}/{}/{}", exchange, market_type, stream, symbol);
 
     let file_paths = if let (Some(from), Some(to)) = (query.from, query.to) {
         // Multi-file query for date range
@@ -83,7 +76,7 @@ async fn get_market_data(
             from: &from,
             to: &to,
         };
-        find_files_for_date_range(find_file_params)
+        find_files_for_date_range(&ctx, find_file_params)
             .await
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
     } else {
@@ -112,6 +105,115 @@ async fn get_market_data(
     }
 
     Ok(Json(ApiResponse{ messages: all_messages }))
+}
+
+#[derive(Clone, Copy, Debug)]
+struct FindFileParams<'a> {
+    parquet_file_extension: &'a str,
+    base_path: &'a str,
+    exchange: &'a str,
+    market_type: &'a str,
+    stream: &'a str,
+    symbol: &'a str,
+    from: &'a DateTime<Utc>,
+    to: &'a DateTime<Utc>,
+}
+
+async fn find_files_for_date_range(ctx: &Extension<ApiContext>, params: FindFileParams<'_>) -> anyhow::Result<Vec<PathBuf>> {
+    let from_date = params.from.date_naive();
+    let to_date = params.to.date_naive();
+
+    // Try to get from cache first
+    let cache_key = format!("{}/{}/{}/{}", params.exchange, params.market_type, params.stream, params.symbol);
+    {
+        let cache = ctx.filepath_cache.read().await;
+        if let Some(cached_files) = cache.get(&cache_key) {
+            // Filter cached files by date range
+            let matching_files: Vec<PathBuf> = get_matching_filepaths(&from_date, &to_date, cached_files);
+
+            if !matching_files.is_empty() {
+                tracing::trace!("filepath cache hit for {}", cache_key);
+                return Ok(matching_files);
+            }
+        }
+    }
+
+    // Cache miss - scan filesystem and populate cache
+    tracing::trace!("filepath cache miss for {}, scanning filesystem", cache_key);
+    let file_metadata = scan_directory_for_metadata(params).await?;
+
+    // Update cache
+    {
+        let mut cache = ctx.filepath_cache.write().await;
+        cache.insert(cache_key, file_metadata.clone());
+    }
+
+    // Filter and return matching files
+    let matching_files = get_matching_filepaths(&from_date, &to_date, &file_metadata);
+
+    Ok(matching_files)
+}
+
+fn get_matching_filepaths(from_date: &NaiveDate, to_date: &NaiveDate, file_metadata: &Vec<FileMetadata>) -> Vec<PathBuf> {
+    let matching_files: Vec<PathBuf> = file_metadata
+        .iter()
+        .filter(|file_meta| {
+            file_meta.date.is_within(&from_date, &to_date)
+        })
+        .map(|file_meta| file_meta.path.clone())
+        .collect();
+    matching_files
+}
+
+trait IsWithin {
+    fn is_within(&self, from: &NaiveDate, to: &NaiveDate) -> bool;
+}
+
+impl IsWithin for NaiveDate {
+    fn is_within(&self, from: &NaiveDate, to: &NaiveDate) -> bool {
+        self >= from && self <= to
+    }
+}
+
+async fn scan_directory_for_metadata(params: FindFileParams<'_>) -> anyhow::Result<Vec<FileMetadata>> {
+    let mut symbol_dir = PathBuf::from(params.base_path);
+    symbol_dir.push(params.exchange);
+    symbol_dir.push(params.market_type);
+    symbol_dir.push(params.stream);
+
+    let mut entries = fs::read_dir(&symbol_dir).await?;
+    let mut file_metadata = Vec::new();
+    let file_extension = format!(".{}", params.parquet_file_extension);
+
+    while let Some(entry) = entries.next_entry().await? {
+        let filename = entry.file_name();
+        let filename_str = filename.to_string_lossy();
+
+        if let Some(date_str) = extract_date_from_filename(&filename_str, params.symbol, &file_extension) {
+            if let Ok(file_date) = NaiveDate::parse_from_str(&date_str, "%Y-%m-%d") {
+                let file_meta = FileMetadata {
+                    path: entry.path(),
+                    date: file_date,
+                };
+                file_metadata.push(file_meta);
+            }
+        }
+    }
+
+    file_metadata.sort_by(|a, b| a.date.cmp(&b.date));
+    Ok(file_metadata)
+}
+
+
+fn extract_date_from_filename(filename: &str, symbol: &str, file_extension: &str) -> Option<String> {
+    // Extract date from e.g.: ethusdt.2019-04-05.parquet
+    let prefix = format!("{}.", symbol);
+    if filename.starts_with(&prefix) && filename.ends_with(&file_extension) {
+        let date = &filename[prefix.len()..filename.len()-file_extension.len()]; // Remove .parquet
+        Some(date.to_string())
+    } else {
+        None
+    }
 }
 
 async fn read_parquet_file(ctx: &Extension<ApiContext>, file_path: &PathBuf) -> anyhow::Result<Vec<Message>, StatusCode> {
@@ -143,66 +245,9 @@ async fn read_parquet_file(ctx: &Extension<ApiContext>, file_path: &PathBuf) -> 
             timestamp_millis: timestamp_info.timestamp_millis,
             timestamp_sec: timestamp_info.timestamp_sec,
             timestamp_sub_sec: timestamp_info.timestamp_sub_sec,
-            data: data,
+            data,
         };
         messages.push(message);
     }
     Ok(messages)
-}
-
-struct FindFileParams<'a> {
-    parquet_file_extension: &'a str,
-    base_path: &'a str,
-    exchange: &'a str,
-    market_type: &'a str,
-    stream: &'a str,
-    symbol: &'a str,
-    from: &'a DateTime<Utc>,
-    to: &'a DateTime<Utc>,
-}
-
-async fn find_files_for_date_range(params: FindFileParams<'_>) -> anyhow::Result<Vec<PathBuf>, std::io::Error> {
-    let mut symbol_dir = PathBuf::from(params.base_path);
-    symbol_dir.push(params.exchange);
-    symbol_dir.push(params.market_type);
-    symbol_dir.push(params.stream);
-
-    // Single directory read
-    let mut entries = fs::read_dir(&symbol_dir).await?;
-    let mut matching_files = Vec::new();
-
-    let file_extension = format!(".{}", params.parquet_file_extension);
-
-    while let Some(entry) = entries.next_entry().await? {
-        let filename = entry.file_name();
-        let filename_str = filename.to_string_lossy();
-
-        // Parse date from filename e.g.: ethusdt.2019-04-05.parquet
-        if let Some(date_str) = extract_date_from_filename(&filename_str, params.symbol, &file_extension) {
-            if let Ok(file_date) = NaiveDate::parse_from_str(&date_str, "%Y-%m-%d") {
-                let file_date = file_date.and_hms_opt(0, 0, 0).unwrap();
-                let file_date_utc = DateTime::<Utc>::from_naive_utc_and_offset(file_date, Utc);
-
-                // Check if file date overlaps with query range
-                if file_date_utc.date_naive() >= params.from.date_naive() &&
-                    file_date_utc.date_naive() <= params.to.date_naive() {
-                    matching_files.push(entry.path());
-                }
-            }
-        }
-    }
-
-    matching_files.sort();
-    Ok(matching_files)
-}
-
-fn extract_date_from_filename(filename: &str, symbol: &str, file_extension: &str) -> Option<String> {
-    // Extract date from e.g.: ethusdt.2019-04-05.parquet
-    let prefix = format!("{}.", symbol);
-    if filename.starts_with(&prefix) && filename.ends_with(&file_extension) {
-        let date = &filename[prefix.len()..filename.len()-file_extension.len()]; // Remove .parquet
-        Some(date.to_string())
-    } else {
-        None
-    }
 }
