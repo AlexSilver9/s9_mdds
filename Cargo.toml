@@ -1,6 +1,26 @@
 [package]
 name = "s9_mdds"
 version = "0.1.0"
-edition = "2024"
+edition = "2021"
+authors = ["Alexander Silvennoinen <alex@silvennoinen.de>"]
 
 [dependencies]
+s9_parquet = { git = "https://github.com/AlexSilver9/s9_parquet.git" }
+#rustls = { version = "0.23.22", default-features = false, features = ["std", "aws_lc_rs"] }
+axum = "0.8"
+tokio = { version = "1.48", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tower = "0.5"
+tower-http = { version = "0.6", features = [
+    "compression-zstd",
+    "cors",
+    "fs",
+    "tracing"
+]}
+tracing-subscriber = "0.3"
+tracing = "0.1"
+anyhow = "1.0"
+dotenv = "0.15"
+itertools = "0.14"
+async-trait = "0.1"
