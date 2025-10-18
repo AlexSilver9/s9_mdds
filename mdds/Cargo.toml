@@ -1,0 +1,48 @@
+[package]
+name = "mdds"
+version = "0.1.0"
+edition = "2021"
+publish = false
+authors = ["Alexander Silvennoinen <alex@silvennoinen.de>"]
+
+[dependencies]
+# s9 dependencies to custom libs
+s9_parquet = { git = "https://github.com/AlexSilver9/s9_parquet.git" }
+
+# Core dependencies: runtime, HTTP framework and database client.
+#rustls = { version = "0.23.22", default-features = false, features = ["std", "aws_lc_rs"] }
+futures = "0.3"
+tokio = { version = "1.48", features = ["full"] }
+axum = "0.8"
+tower = "0.5"
+tower-http = { version = "0.6", features = ["compression-zstd", "cors", "fs", "tracing"]}
+
+# Serdes
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Configuration
+clap = { version = "4.5.49", features = ["derive", "env"] }
+
+# Password hashing.
+argon2 = "0.5"
+
+# Cryptography
+jwt = "0.16"
+hmac = "0.12"
+sha2 = "0.10"
+uuid = { version = "1.18", features = ["serde"] }
+
+# Observability
+tracing-subscriber = "0.3"
+tracing = "0.1"
+
+# Error handling
+anyhow = "1.0"
+thiserror = "2.0"
+
+# Utility Crates
+dotenv = "0.15"
+itertools = "0.14"
+async-trait = "0.1"
+time = "0.3"

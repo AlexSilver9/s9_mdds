@@ -1,9 +1,15 @@
+mod config;
+
+use std::env;
+use anyhow::Error;
 use axum::{Json, Router};
 use axum::http::StatusCode;
 use axum::routing::get;
+use clap::Parser;
 use s9_parquet::{TimestampInfo};
 use serde::Serialize;
 use tower_http::cors::CorsLayer;
+use crate::config::Config;
 
 #[derive(Debug, Serialize)]
 struct Message {
@@ -18,17 +24,27 @@ struct ApiResponse<M> {
     messages: M,
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+pub async fn run() -> anyhow::Result<(), Error> {
+    // Load .env file if it exists
+    dotenv::dotenv().ok();
+
+    // Initialize tracing/logging
     tracing_subscriber::fmt()
         .with_max_level(tracing::Level::DEBUG)
         .init();
 
+    // Load configuration from environment variables
+    let config = Config::parse();
+
+    start_server(config).await
+}
+
+async fn start_server(config: Config) -> anyhow::Result<(), Error> {
     let app = Router::new()
         .route("/api/v1/market-data", get(get_market_data))
         .layer(CorsLayer::permissive());
 
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await?;
+    let listener = tokio::net::TcpListener::bind(config.server_address).await?;
     tracing::info!("Server listening on {}", listener.local_addr()?);
 
     axum::serve(listener, app).await?;
@@ -41,7 +57,7 @@ async fn get_market_data() -> Result<Json<ApiResponse<Vec<Message>>>, StatusCode
     // TODO: Make configurable
     let batch_size = 1024;
 
-    let reader = s9_parquet::AsyncParquetReader::new("data/ethusdt.trade.parquet", batch_size).await
+    let reader = s9_parquet::AsyncParquetReader::new("data/market_data/ethusdt.trade.parquet", batch_size).await
         .map_err(|err| {
             tracing::error!("Error reading parquet file: {}", err);
             StatusCode::INTERNAL_SERVER_ERROR

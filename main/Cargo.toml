@@ -1,0 +1,11 @@
+[package]
+name = "main"
+version = "0.1.0"
+edition = "2021"
+publish = false
+authors = ["Alexander Silvennoinen <alex@silvennoinen.de>"]
+
+[dependencies]
+mdds = { path = "../mdds"}
+tokio = { version = "1.48", features = ["full"] }
+anyhow = "1.0"
