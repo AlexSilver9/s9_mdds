@@ -1,4 +1,4 @@
-use axum::body::{Body};
+use axum::body::Body;
 use axum::http::header::WWW_AUTHENTICATE;
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::IntoResponse;
