@@ -1,5 +1,4 @@
 use crate::http::ApiContext;
-use crate::fs::{files_in_time_slice, scan_directory_for_files, FindFileParams, TimeSlice};
 use axum::extract::{Path, Query};
 use axum::routing::get;
 use axum::{Extension, Json, Router};
@@ -7,6 +6,8 @@ use chrono::{DateTime, Utc};
 use http::StatusCode;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use crate::fs::file_finder::FileFinder;
+use crate::fs::TimeSlice;
 
 pub fn router() -> Router {
 
@@ -66,7 +67,7 @@ async fn get_market_data(
 
     let file_paths = if let (Some(from), Some(to)) = (query.from, query.to) {
         // Multi-file query for date range
-        let find_file_params = FindFileParams {
+        let file_finder = FileFinder {
             parquet_file_extension: &ctx.config.parquet_file_extension,
             base_path: &ctx.config.market_data_path,
             exchange: &exchange,
@@ -79,9 +80,7 @@ async fn get_market_data(
             },
         };
 
-        find_files(find_file_params)
-            .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        file_finder.find_files().await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
     } else {
         return Err(StatusCode::BAD_REQUEST);
     };
@@ -108,16 +107,6 @@ async fn get_market_data(
     }
 
     Ok(Json(ApiResponse{ messages: all_messages }))
-}
-
-
-
-async fn find_files(params: FindFileParams<'_>) -> anyhow::Result<Vec<PathBuf>> {
-    // Find, filter and return matching files
-    let files = scan_directory_for_files(params).await?;
-    let files = files_in_time_slice(&files, &params.time_slice);
-
-    Ok(files)
 }
 
 async fn read_parquet_file(ctx: &Extension<ApiContext>, file_path: &PathBuf) -> anyhow::Result<Vec<Message>, StatusCode> {
