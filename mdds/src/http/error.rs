@@ -87,3 +87,14 @@ impl IntoResponse for Error {
         (self.status_code(), self.to_string()).into_response()
     }
 }
+
+impl Into<axum::Error> for Error {
+    fn into(self) -> axum::Error {
+        match self {
+            Error::Unauthorized => axum::Error::new("authentication required"),
+            Error::Forbidden => axum::Error::new("user may not perform that action"),
+            Error::NotFound => axum::Error::new("request path not found"),
+            Error::Anyhow(e) => axum::Error::new(e),
+        }
+    }
+}
